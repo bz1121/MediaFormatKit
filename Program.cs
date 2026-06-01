@@ -104,8 +104,10 @@ internal sealed class MainForm : Form
             DropDownStyle = ComboBoxStyle.DropDownList
         };
         _presetBox.Items.AddRange([
-            "压缩视频到约 200MB（MP4）",
-            "压缩视频到约 100MB（MP4）",
+            "NVIDIA 快速压缩到约 200MB（MP4）",
+            "NVIDIA 快速压缩到约 100MB（MP4）",
+            "CPU 兼容压缩到约 200MB（MP4）",
+            "CPU 兼容压缩到约 100MB（MP4）",
             "保留画面，音频转 AAC 44.1k 立体声（MP4）",
             "保留画面，音频转 AAC 48k 立体声（MP4）",
             "保留画面，音频转 PCM 16-bit（MOV）",
@@ -336,19 +338,21 @@ internal sealed class MainForm : Form
     {
         return preset switch
         {
-            0 => await BuildCompressPlanAsync(inputPath, outputFolder, 200),
-            1 => await BuildCompressPlanAsync(inputPath, outputFolder, 100),
-            2 => new ConversionPlan(GetOutputPath(inputPath, "_aac441", ".mp4", outputFolder), ["-map", "0:V:0?", "-map", "0:a:0?", "-map_metadata", "-1", "-c:v", "copy", "-c:a", "aac", "-profile:a", "aac_low", "-ar", "44100", "-ac", "2", "-b:a", "128k", "-movflags", "+faststart"]),
-            3 => new ConversionPlan(GetOutputPath(inputPath, "_aac48", ".mp4", outputFolder), ["-map", "0:V:0?", "-map", "0:a:0?", "-map_metadata", "-1", "-c:v", "copy", "-c:a", "aac", "-profile:a", "aac_low", "-ar", "48000", "-ac", "2", "-b:a", "160k", "-movflags", "+faststart"]),
-            4 => new ConversionPlan(GetOutputPath(inputPath, "_pcm16", ".mov", outputFolder), ["-map", "0:V:0?", "-map", "0:a:0?", "-map_metadata", "-1", "-c:v", "copy", "-c:a", "pcm_s16le", "-ar", "48000", "-ac", "2"]),
-            5 => new ConversionPlan(GetOutputPath(inputPath, "_video_only", ".mp4", outputFolder), ["-map", "0:V:0?", "-map_metadata", "-1", "-c:v", "copy", "-an", "-movflags", "+faststart"]),
-            6 => new ConversionPlan(GetOutputPath(inputPath, "_audio", ".mp3", outputFolder), ["-vn", "-c:a", "libmp3lame", "-b:a", "192k"]),
-            7 => new ConversionPlan(GetOutputPath(inputPath, "_audio", ".wav", outputFolder), ["-vn", "-c:a", "pcm_s16le", "-ar", "48000", "-ac", "2"]),
+            0 => await BuildCompressPlanAsync(inputPath, outputFolder, 200, useNvenc: true),
+            1 => await BuildCompressPlanAsync(inputPath, outputFolder, 100, useNvenc: true),
+            2 => await BuildCompressPlanAsync(inputPath, outputFolder, 200, useNvenc: false),
+            3 => await BuildCompressPlanAsync(inputPath, outputFolder, 100, useNvenc: false),
+            4 => new ConversionPlan(GetOutputPath(inputPath, "_aac441", ".mp4", outputFolder), ["-map", "0:V:0?", "-map", "0:a:0?", "-map_metadata", "-1", "-c:v", "copy", "-c:a", "aac", "-profile:a", "aac_low", "-ar", "44100", "-ac", "2", "-b:a", "128k", "-movflags", "+faststart"]),
+            5 => new ConversionPlan(GetOutputPath(inputPath, "_aac48", ".mp4", outputFolder), ["-map", "0:V:0?", "-map", "0:a:0?", "-map_metadata", "-1", "-c:v", "copy", "-c:a", "aac", "-profile:a", "aac_low", "-ar", "48000", "-ac", "2", "-b:a", "160k", "-movflags", "+faststart"]),
+            6 => new ConversionPlan(GetOutputPath(inputPath, "_pcm16", ".mov", outputFolder), ["-map", "0:V:0?", "-map", "0:a:0?", "-map_metadata", "-1", "-c:v", "copy", "-c:a", "pcm_s16le", "-ar", "48000", "-ac", "2"]),
+            7 => new ConversionPlan(GetOutputPath(inputPath, "_video_only", ".mp4", outputFolder), ["-map", "0:V:0?", "-map_metadata", "-1", "-c:v", "copy", "-an", "-movflags", "+faststart"]),
+            8 => new ConversionPlan(GetOutputPath(inputPath, "_audio", ".mp3", outputFolder), ["-vn", "-c:a", "libmp3lame", "-b:a", "192k"]),
+            9 => new ConversionPlan(GetOutputPath(inputPath, "_audio", ".wav", outputFolder), ["-vn", "-c:a", "pcm_s16le", "-ar", "48000", "-ac", "2"]),
             _ => new ConversionPlan(GetOutputPath(inputPath, "_audio", ".m4a", outputFolder), ["-vn", "-c:a", "aac", "-profile:a", "aac_low", "-ar", "44100", "-ac", "2", "-b:a", "128k"])
         };
     }
 
-    private static async Task<ConversionPlan> BuildCompressPlanAsync(string inputPath, string outputFolder, int targetMb)
+    private static async Task<ConversionPlan> BuildCompressPlanAsync(string inputPath, string outputFolder, int targetMb, bool useNvenc)
     {
         var durationSeconds = await GetDurationSecondsAsync(inputPath);
         if (durationSeconds <= 0)
@@ -362,18 +366,35 @@ internal sealed class MainForm : Form
         var maxRateKbps = Math.Max(videoKbps + 100, (int)(videoKbps * 1.5));
         var bufferKbps = Math.Max(maxRateKbps * 2, videoKbps * 3);
 
+        var suffix = useNvenc ? $"_nvenc_{targetMb}MB" : $"_compress_{targetMb}MB";
+        var videoArgs = useNvenc
+            ? new[]
+            {
+                "-c:v", "h264_nvenc",
+                "-preset", "p4",
+                "-rc", "vbr",
+                "-b:v", $"{videoKbps}k",
+                "-maxrate", $"{maxRateKbps}k",
+                "-bufsize", $"{bufferKbps}k",
+                "-pix_fmt", "yuv420p"
+            }
+            : new[]
+            {
+                "-c:v", "libx264",
+                "-preset", "veryfast",
+                "-b:v", $"{videoKbps}k",
+                "-maxrate", $"{maxRateKbps}k",
+                "-bufsize", $"{bufferKbps}k",
+                "-pix_fmt", "yuv420p"
+            };
+
         return new ConversionPlan(
-            GetOutputPath(inputPath, $"_compress_{targetMb}MB", ".mp4", outputFolder),
+            GetOutputPath(inputPath, suffix, ".mp4", outputFolder),
             [
                 "-map", "0:V:0?",
                 "-map", "0:a:0?",
                 "-map_metadata", "-1",
-                "-c:v", "libx264",
-                "-preset", "medium",
-                "-b:v", $"{videoKbps}k",
-                "-maxrate", $"{maxRateKbps}k",
-                "-bufsize", $"{bufferKbps}k",
-                "-pix_fmt", "yuv420p",
+                .. videoArgs,
                 "-c:a", "aac",
                 "-profile:a", "aac_low",
                 "-b:a", $"{audioKbps}k",

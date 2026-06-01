@@ -104,6 +104,8 @@ internal sealed class MainForm : Form
             DropDownStyle = ComboBoxStyle.DropDownList
         };
         _presetBox.Items.AddRange([
+            "压缩视频到约 200MB（MP4）",
+            "压缩视频到约 100MB（MP4）",
             "保留画面，音频转 AAC 44.1k 立体声（MP4）",
             "保留画面，音频转 AAC 48k 立体声（MP4）",
             "保留画面，音频转 PCM 16-bit（MOV）",
@@ -298,7 +300,7 @@ internal sealed class MainForm : Form
                 return;
             }
 
-            var plan = BuildConversionPlan(_pathBox.Text, _outputBox.Text, _presetBox.SelectedIndex);
+            var plan = await BuildConversionPlanAsync(_pathBox.Text, _outputBox.Text, _presetBox.SelectedIndex);
             if (File.Exists(plan.OutputPath))
             {
                 var answer = MessageBox.Show($"输出文件已存在，是否覆盖？\n{plan.OutputPath}", "确认覆盖", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
@@ -330,18 +332,54 @@ internal sealed class MainForm : Form
         }
     }
 
-    private static ConversionPlan BuildConversionPlan(string inputPath, string outputFolder, int preset)
+    private static async Task<ConversionPlan> BuildConversionPlanAsync(string inputPath, string outputFolder, int preset)
     {
         return preset switch
         {
-            0 => new ConversionPlan(GetOutputPath(inputPath, "_aac441", ".mp4", outputFolder), ["-map", "0:V:0?", "-map", "0:a:0?", "-map_metadata", "-1", "-c:v", "copy", "-c:a", "aac", "-profile:a", "aac_low", "-ar", "44100", "-ac", "2", "-b:a", "128k", "-movflags", "+faststart"]),
-            1 => new ConversionPlan(GetOutputPath(inputPath, "_aac48", ".mp4", outputFolder), ["-map", "0:V:0?", "-map", "0:a:0?", "-map_metadata", "-1", "-c:v", "copy", "-c:a", "aac", "-profile:a", "aac_low", "-ar", "48000", "-ac", "2", "-b:a", "160k", "-movflags", "+faststart"]),
-            2 => new ConversionPlan(GetOutputPath(inputPath, "_pcm16", ".mov", outputFolder), ["-map", "0:V:0?", "-map", "0:a:0?", "-map_metadata", "-1", "-c:v", "copy", "-c:a", "pcm_s16le", "-ar", "48000", "-ac", "2"]),
-            3 => new ConversionPlan(GetOutputPath(inputPath, "_video_only", ".mp4", outputFolder), ["-map", "0:V:0?", "-map_metadata", "-1", "-c:v", "copy", "-an", "-movflags", "+faststart"]),
-            4 => new ConversionPlan(GetOutputPath(inputPath, "_audio", ".mp3", outputFolder), ["-vn", "-c:a", "libmp3lame", "-b:a", "192k"]),
-            5 => new ConversionPlan(GetOutputPath(inputPath, "_audio", ".wav", outputFolder), ["-vn", "-c:a", "pcm_s16le", "-ar", "48000", "-ac", "2"]),
+            0 => await BuildCompressPlanAsync(inputPath, outputFolder, 200),
+            1 => await BuildCompressPlanAsync(inputPath, outputFolder, 100),
+            2 => new ConversionPlan(GetOutputPath(inputPath, "_aac441", ".mp4", outputFolder), ["-map", "0:V:0?", "-map", "0:a:0?", "-map_metadata", "-1", "-c:v", "copy", "-c:a", "aac", "-profile:a", "aac_low", "-ar", "44100", "-ac", "2", "-b:a", "128k", "-movflags", "+faststart"]),
+            3 => new ConversionPlan(GetOutputPath(inputPath, "_aac48", ".mp4", outputFolder), ["-map", "0:V:0?", "-map", "0:a:0?", "-map_metadata", "-1", "-c:v", "copy", "-c:a", "aac", "-profile:a", "aac_low", "-ar", "48000", "-ac", "2", "-b:a", "160k", "-movflags", "+faststart"]),
+            4 => new ConversionPlan(GetOutputPath(inputPath, "_pcm16", ".mov", outputFolder), ["-map", "0:V:0?", "-map", "0:a:0?", "-map_metadata", "-1", "-c:v", "copy", "-c:a", "pcm_s16le", "-ar", "48000", "-ac", "2"]),
+            5 => new ConversionPlan(GetOutputPath(inputPath, "_video_only", ".mp4", outputFolder), ["-map", "0:V:0?", "-map_metadata", "-1", "-c:v", "copy", "-an", "-movflags", "+faststart"]),
+            6 => new ConversionPlan(GetOutputPath(inputPath, "_audio", ".mp3", outputFolder), ["-vn", "-c:a", "libmp3lame", "-b:a", "192k"]),
+            7 => new ConversionPlan(GetOutputPath(inputPath, "_audio", ".wav", outputFolder), ["-vn", "-c:a", "pcm_s16le", "-ar", "48000", "-ac", "2"]),
             _ => new ConversionPlan(GetOutputPath(inputPath, "_audio", ".m4a", outputFolder), ["-vn", "-c:a", "aac", "-profile:a", "aac_low", "-ar", "44100", "-ac", "2", "-b:a", "128k"])
         };
+    }
+
+    private static async Task<ConversionPlan> BuildCompressPlanAsync(string inputPath, string outputFolder, int targetMb)
+    {
+        var durationSeconds = await GetDurationSecondsAsync(inputPath);
+        if (durationSeconds <= 0)
+        {
+            throw new InvalidOperationException("无法读取视频时长，不能按目标大小压缩。");
+        }
+
+        var totalKbps = (int)Math.Floor(targetMb * 8192d / durationSeconds);
+        var audioKbps = totalKbps >= 900 ? 128 : Math.Max(64, totalKbps / 5);
+        var videoKbps = Math.Max(250, totalKbps - audioKbps);
+        var maxRateKbps = Math.Max(videoKbps + 100, (int)(videoKbps * 1.5));
+        var bufferKbps = Math.Max(maxRateKbps * 2, videoKbps * 3);
+
+        return new ConversionPlan(
+            GetOutputPath(inputPath, $"_compress_{targetMb}MB", ".mp4", outputFolder),
+            [
+                "-map", "0:V:0?",
+                "-map", "0:a:0?",
+                "-map_metadata", "-1",
+                "-c:v", "libx264",
+                "-preset", "medium",
+                "-b:v", $"{videoKbps}k",
+                "-maxrate", $"{maxRateKbps}k",
+                "-bufsize", $"{bufferKbps}k",
+                "-pix_fmt", "yuv420p",
+                "-c:a", "aac",
+                "-profile:a", "aac_low",
+                "-b:a", $"{audioKbps}k",
+                "-ac", "2",
+                "-movflags", "+faststart"
+            ]);
     }
 
     private static string GetOutputPath(string inputPath, string suffix, string extension, string outputFolder)
@@ -396,6 +434,18 @@ internal sealed class MainForm : Form
         }
 
         return builder.ToString();
+    }
+
+    private static async Task<double> GetDurationSecondsAsync(string path)
+    {
+        var result = await RunProcessAsync(FindTool("ffprobe"), ["-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", path]);
+        if (result.ExitCode != 0)
+        {
+            throw new InvalidOperationException(result.Output.Trim());
+        }
+
+        var text = result.Output.Trim();
+        return double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out var duration) ? duration : 0;
     }
 
     private static Dictionary<string, string> ParseCompactLine(string line)
